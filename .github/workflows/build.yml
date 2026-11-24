@@ -1,0 +1,29 @@
+name: Windows build
+on: [push, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get WacOS
+        uses: actions/checkout@v4
+        with:
+          repository: renzyxx/WacOS
+          ref: c5ce3361edd949a52f878ca1b73135cd0ba96f14
+          path: WacOS
+      - name: Build
+        working-directory: WacOS
+        shell: cmd
+        run: |
+          git apply --ignore-space-change ..\wacos-fixes.patch || exit /b 1
+          call build.cmd || exit /b 1
+          call build.cmd janelas || exit /b 1
+          >bin\versao.txt echo w10-liquid-glass-1
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\empacotar.ps1 -Atualizacao || exit /b 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WacOS-Windows-10
+          path: WacOS/dist/*.zip
+          if-no-files-found: error

@@ -1,0 +1,514 @@
+diff --git a/src/clima/main.cpp b/src/clima/main.cpp
+index 1695102..67fef1a 100644
+--- a/src/clima/main.cpp
++++ b/src/clima/main.cpp
+@@ -1,12 +1,13 @@
+ // Clima (Weather do Mac): à esquerda as cidades (a primeira é a dos Ajustes, a mesma do widget); à direita, sobre
+ // um fundo da cor do céu, a cidade, a temperatura grande, a condição, máx./mín., a previsão por hora (24 h), a de
+-// 10 dias (com a barra de mín.–máx.) e os quadros de sensação, umidade, vento e sol. Dados do Open-Meteo (sem chave).
++// 10 dias (com a barra de mín.–máx.) e os quadros de sensação, umidade, vento e sol. Previsão do ECMWF IFS pelo Open-Meteo.
+ // "+" procura uma cidade pelo nome (geocodificação do Open-Meteo); botão direito numa cidade: tornar "Meu Local"
+ // (vai para os Ajustes, o mesmo do widget) ou apagar (o "Meu Local" também, se houver outra para ficar no lugar).
+ // Cidades em %APPDATA%\Shell\clima.txt.
+ #include "../comum/app2d.h"
+ #include "../comum/fonte_cjk.h" // a reserva para coreano, japonês e chinês
+ #include "../comum/cidade_padrao.h"
++#include "../comum/previsao.h"
+ #include <winhttp.h>
+ #include <map>
+ #include <mutex>
+@@ -104,13 +105,19 @@ bool Parse(const std::string& j, Wx& w) {
+     double off = Number(j, "utc_offset_seconds"); if (!std::isnan(off)) w.off = (int)off;
+     w.temp = (float)Number(cur, "temperature_2m"); w.feels = (float)Number(cur, "apparent_temperature");
+     w.hum = (float)Number(cur, "relative_humidity_2m"); w.wind = (float)Number(cur, "wind_speed_10m");
+-    w.code = (int)Number(cur, "weather_code"); w.day = Number(cur, "is_day") > 0.5;
++    double code = Number(cur, "weather_code"), day = Number(cur, "is_day");
++    if (!std::isfinite(w.temp) || !std::isfinite(w.feels) || !std::isfinite(w.hum) ||
++        !std::isfinite(w.wind) || !std::isfinite(code) || !std::isfinite(day)) return false;
++    w.code = (int)code; w.day = day > 0.5;
+     auto t = Array(hr, "time"), tp = Array(hr, "temperature_2m"), c = Array(hr, "weather_code"), d = Array(hr, "is_day");
+-    for (size_t i = 0; i < t.size() && i < tp.size() && i < c.size() && i < d.size(); i++) w.hours.push_back({ t[i], (float)tp[i], (int)c[i], d[i] > 0.5 });
++    for (size_t i = 0; i < t.size() && i < tp.size() && i < c.size() && i < d.size(); i++)
++        if (std::isfinite(t[i]) && std::isfinite(tp[i]) && std::isfinite(c[i]) && std::isfinite(d[i]))
++            w.hours.push_back({ t[i], (float)tp[i], (int)c[i], d[i] > 0.5 });
+     auto dt = Array(dl, "time"), mx = Array(dl, "temperature_2m_max"), mn = Array(dl, "temperature_2m_min"), dc = Array(dl, "weather_code"), sr = Array(dl, "sunrise"), ss = Array(dl, "sunset");
+     for (size_t i = 0; i < dt.size() && i < mx.size() && i < mn.size() && i < dc.size(); i++)
+-        w.days.push_back({ dt[i], (float)mx[i], (float)mn[i], (int)dc[i], i < sr.size() ? sr[i] : 0, i < ss.size() ? ss[i] : 0 });
+-    w.ok = !std::isnan(w.temp) && !w.days.empty();
++        if (std::isfinite(dt[i]) && std::isfinite(mx[i]) && std::isfinite(mn[i]) && std::isfinite(dc[i]))
++            w.days.push_back({ dt[i], (float)mx[i], (float)mn[i], (int)dc[i], i < sr.size() ? sr[i] : 0, i < ss.size() ? ss[i] : 0 });
++    w.ok = !w.hours.empty() && !w.days.empty();
+     return w.ok;
+ }
+ 
+@@ -125,9 +132,13 @@ void Fetch(int i) {
+             L"&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,is_day"
+             L"&hourly=temperature_2m,weather_code,is_day&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset"
+             L"&timezone=auto&forecast_days=10&timeformat=unixtime";
+-        std::string body = HttpGet(L"api.open-meteo.com", path);
+         auto* w = new Wx;
+-        if (body.empty() || !Parse(body, *w)) w->ok = false;
++        previsao::Fetch(path, HttpGet, [w](const std::string& body) {
++            Wx candidate;
++            if (!Parse(body, candidate)) return false;
++            *w = std::move(candidate);
++            return true;
++        });
+         if (!PostMessageW(h, WM_DATA, (WPARAM)i, (LPARAM)w)) delete w;
+     }).detach();
+ }
+@@ -211,7 +222,7 @@ void Sky(const Wx& w, D2D1_COLOR_F& a, D2D1_COLOR_F& b) {
+     else { a = Rgb(40, 110, 200); b = Rgb(110, 170, 230); }
+ }
+ std::wstring HourOf(double unix, int off) { time_t t = (time_t)unix + off; tm g{}; gmtime_s(&g, &t); wchar_t b[8]; swprintf_s(b, L"%d", g.tm_hour); return b; }
+-std::wstring HmOf(double unix, int off) { time_t t = (time_t)unix + off; tm g{}; gmtime_s(&g, &t); wchar_t b[8]; swprintf_s(b, L"%d:%02d", g.tm_hour, g.tm_min); return b; }
++std::wstring HmOf(double unix, int off) { if (!std::isfinite(unix) || unix <= 0) return L"—"; time_t t = (time_t)unix + off; tm g{}; gmtime_s(&g, &t); wchar_t b[8]; swprintf_s(b, L"%d:%02d", g.tm_hour, g.tm_min); return b; }
+ int WdayOf(double unix, int off) { time_t t = (time_t)unix + off; tm g{}; gmtime_s(&g, &t); return g.tm_wday; }
+ 
+ struct Hit { int kind, arg; D2D1_RECT_F r; };
+diff --git a/src/comum/idioma_en.inc b/src/comum/idioma_en.inc
+index 4e092c2..726ceeb 100644
+--- a/src/comum/idioma_en.inc
++++ b/src/comum/idioma_en.inc
+@@ -429,7 +429,7 @@
+ { L"Vidro real (refração)", L"Real glass (refraction)" },
+ { L"O fundo aparece nítido e dobra nas bordas, como no Tahoe. Gravações de outros programas não mostram o Dock e os painéis; desligue para gravar a tela.", L"The background shows through sharp and bends at the edges, like in Tahoe. Recordings from other programs don’t show the Dock and panels; turn this off to record the screen." },
+ { L"Refração nas bordas", L"Edge refraction" },
+-{ L"Reiniciar o Liquid Glass", L"Restart Liquid Glass" },
++{ L"Reiniciar o Liquid Glass", L"Reset Glass" },
+ { L"Reiniciar o WacOS", L"Restart WacOS" },
+ { L"Fecha e abre de novo a barra de menus, o Dock, a mesa e o vidro, sem sair do Windows. Os seus apps continuam abertos.", L"Closes and reopens the menu bar, Dock, desktop and glass without signing out of Windows. Your apps stay open." },
+ { L"Atualizações Disponíveis", L"Updates Available" },
+@@ -438,7 +438,7 @@
+ { L" mudanças", L" changes" },
+ { L"Avisar quando houver atualização", L"Notify me when an update is available" },
+ { L"O WacOS confere o GitHub ao entrar e a cada 6 horas e mostra uma notificação quando sai uma versão nova.", L"WacOS checks GitHub at sign-in and every 6 hours and shows a notification when a new version is out." },
+-{ L"Se o vidro ficar fosco, preto ou parado, refaz o Liquid Glass sem reiniciar o Shell.", L"If the glass turns frosted, black or frozen, this rebuilds Liquid Glass without restarting the Shell." },
++{ L"Se o vidro ficar fosco, preto ou parado, refaz o Liquid Glass sem reiniciar o Shell.", L"Liquid Glass retries automatically after a capture failure. Use Reset Glass to retry immediately." },
+ { L"Nenhum", L"None" },
+ { L"Forte", L"Strong" },
+ { L"Aparecer em gravações e transmissões", L"Show in recordings and streams" },
+diff --git a/src/comum/previsao.h b/src/comum/previsao.h
+new file mode 100644
+index 0000000..5ba1dec
+--- /dev/null
++++ b/src/comum/previsao.h
+@@ -0,0 +1,18 @@
++#pragma once
++
++#include <string>
++
++namespace previsao {
++
++// ECMWF IFS is the primary forecast model. Keep Open-Meteo's local model
++// selection available when IFS is delayed or lacks the requested fields.
++template<class Get, class Accept>
++std::string Fetch(const std::wstring& path, Get get, Accept accept) {
++    const wchar_t* host = L"api.open-meteo.com";
++    auto body = get(host, path + L"&models=ecmwf_ifs");
++    if (accept(body)) return body;
++    body = get(host, path);
++    return accept(body) ? body : std::string{};
++}
++
++}  // namespace previsao
+diff --git a/src/setup/main.cpp b/src/setup/main.cpp
+index bfa53df..d78fc5f 100644
+--- a/src/setup/main.cpp
++++ b/src/setup/main.cpp
+@@ -14,6 +14,7 @@
+ #define WIN32_LEAN_AND_MEAN
+ #define NOMINMAX
+ #include <windows.h>
++#include "../comum/idioma.h"
+ #include "../comum/fonte_cjk.h" // a reserva para coreano, japonês e chinês
+ #include <windowsx.h>
+ #include <d2d1.h>
+@@ -56,7 +57,7 @@
+ 
+ using std::wstring;
+ 
+-// ============================================================ textos (português ou inglês, pelo idioma do Windows)
++// ============================================================ textos (português ou inglês, pelo idioma do WacOS)
+ static bool g_pt;
+ static const wchar_t* T(const wchar_t* pt, const wchar_t* en) { return g_pt ? pt : en; }
+ 
+@@ -1385,7 +1386,7 @@ static void LoadLogo(HINSTANCE hi) {  // o logo (docs\logo-256.png, embutido com
+ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, LPWSTR cmdLine, int) {
+     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+-    g_pt = PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_PORTUGUESE;
++    g_pt = idioma::Pt();
+     wchar_t me[MAX_PATH]; GetModuleFileNameW(nullptr, me, MAX_PATH); g_self = me; g_selfDir = Parent(g_self);
+     g_dest = Env(L"LOCALAPPDATA") + L"\\Programs\\WacOS";
+     g_log = g_dest + L"\\instalacao.log";
+diff --git a/src/shell/backdrop.cpp b/src/shell/backdrop.cpp
+index fbb1132..8de389c 100644
+--- a/src/shell/backdrop.cpp
++++ b/src/shell/backdrop.cpp
+@@ -180,6 +180,7 @@ struct Entry {
+     wuc::CompositionEffectBrush lensBrush[LENS]{ nullptr, nullptr, nullptr };
+     wuc::CompositionRoundedRectangleGeometry lensGeo[LENS]{ nullptr, nullptr, nullptr };
+     wuc::CompositionBrush baseBrush{ nullptr };        // vidro do Tahoe: fosco + vibrância (MakeFrost)
++    bool hasHostBackdrop = false;
+     wuc::CompositionBrush hostBrush{ nullptr };        // o HostBackdropBrush direto (Sequoia)
+     wuc::CompositionRoundedRectangleGeometry baseGeo{ nullptr };
+     wuc::CompositionGeometricClip baseClip{ nullptr };
+@@ -272,7 +273,7 @@ void BuildLiquid(Entry& e) {
+     e.liquidBuilt = true;
+     auto kids = e.root.Children();
+     // o vidro todo (sem anéis de lente: o fundo não pode ser transformado, ver MakeFrost)
+-    e.baseBrush = MakeFrost();
++    e.baseBrush = e.hasHostBackdrop ? MakeFrost() : e.hostBrush;
+     e.baseGeo = g_comp.CreateRoundedRectangleGeometry();
+     e.baseClip = g_comp.CreateGeometricClip(e.baseGeo);
+     // reflexo no alto
+@@ -452,6 +453,9 @@ namespace wgc = winrt::Windows::Graphics::Capture;
+ namespace wd3 = winrt::Windows::Graphics::DirectX::Direct3D11;
+ const UINT WM_RG_FRAME = WM_APP + 140;
+ const UINT_PTR T_RG = 1;
++const UINT_PTR T_RG_RETRY = T_RG + 2;
++ULONGLONG emptySince;
++std::atomic<unsigned> captureGeneration{ 0 };
+ bool tried, ok, active;
+ ID3D11Device* d3d;
+ ID3D11DeviceContext* ctx;
+@@ -536,6 +540,7 @@ LRESULT CALLBACK MsgProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+     if (m == fingePreta && fingePreta) { g_fingeMesaPreta = w != 0; allDirty = true; capDirty = true; return 1; }
+     if (m == WM_RG_FRAME) {  // quadro novo, ou janela apareceu/sumiu/mudou de ordem: monta o fundo já
+         posted = false;
++        if (!active) return 0;
+         // janela mexendo: até 60 por segundo; só conteúdo mudando (vídeo, texto rolando atrás do Dock): também até 60 (30 deixava o vidro atrasado)
+         // (frameDirty, ver Poll)
+         if (w == 1) frameDirty = true; else capDirty = true;
+@@ -549,19 +554,33 @@ LRESULT CALLBACK MsgProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+     // o que ficou pendente; o temporizador só existe enquanto há algo (antes acordava 60 vezes/s sempre)
+     if (m == WM_TIMER && w == T_RG + 1) {
+         KillTimer(h, T_RG + 1);
++        if (!active) return 0;
+         st_nonDesk = false;
+         Poll(false);
+         if (frameDirty || capDirty) SetTimer(h, T_RG + 1, 16, nullptr);
+         return 0;
+     }
+-    if (m == WM_TIMER && w == T_RG && g_busy) return 0;
+-    if (m == WM_TIMER && w == T_RG) {  // rede de segurança: janelas que se moveram sem aviso; janelas novas do Shell
+-        if (semCaptura && active) {
+-            Log(L"vidro real: nenhuma janela pôde ser capturada (fundo preto); voltando ao vidro fosco até o Shell reiniciar");
++    if (m == WM_TIMER && w == T_RG_RETRY) {
++        if (g_busy) return 0;
++        KillTimer(h, T_RG_RETRY);
++        semCaptura = false;
++        backdrop::Reload();
++        return 0;
++    }
++    if (m == WM_TIMER && w == T_RG) {
++        if (g_busy || !active) return 0;
++        if (semCaptura) {
++            Log(L"vidro real: captura indisponível; usando o vidro fosco e tentando novamente em 10 s");
+             g_style.real = false;
+             SetActive(false);
++            SetTimer(h, T_RG_RETRY, 10000, nullptr);
+             return 0;
+         }
++        // Recheck an empty backdrop even if no new frame or window event arrives.
++        if (emptySince && GetTickCount64() - emptySince >= 3000) {
++            capDirty = true;
++            allDirty = true;
++        }
+         static int tick = 0;
+         if (tick++ % 8 == 0) ApplyAffinity();  // ~2 s (as janelas novas do Shell são raras)
+         if (tick % 40 == 0) {  // a cada 10 s: o que o vidro fez (diagnóstico de CPU)
+@@ -740,11 +759,6 @@ std::shared_ptr<WinCap> StartCap(HWND h) {
+     }
+ }
+ 
+-void StopCaps() {
+-    for (auto& c : caps) c->Close();
+-    caps.clear();
+-}
+-
+ // Quais janelas estão na tela agora (de cima para baixo, as 10 primeiras, mesmo cobertas por outras), não só
+ // as que estão atrás das peças: quando uma peça nova aparece (o seletor do Alt+Tab, no meio da tela) ou uma
+ // janela de trás vem para a frente, o vidro já tem o quadro dela. Capturas novas abrem numa thread (cada
+@@ -755,25 +769,27 @@ std::vector<HWND> pending;
+ 
+ winrt::com_ptr<ID2D1Bitmap1> g_papel;  // o papel de parede da mesa, por baixo do fundo (issue #31; Compose)
+ std::vector<RECT> GlassAreas();
+-bool capJaFuncionou = false;  // alguma montagem já teve janela com quadro (a captura funciona neste PC)
++void StopCaps() {
++    std::vector<std::pair<HWND, std::shared_ptr<WinCap>>> discarded;
++    {
++        std::lock_guard<std::mutex> lk(readyMx);
++        ++captureGeneration;
++        discarded.swap(ready);
++    }
++    pending.clear();
++    capFailed.clear();
++    for (auto& [h, c] : discarded) if (c) c->Close();
++    for (auto& c : caps) c->Close();
++    caps.clear();
++}
+ 
+ void RefreshWindows() {
+-    {   // sem captura nenhuma (todas recusadas, nenhuma aberta) por 3 s: também desiste
+-        static DWORD semCaps = 0;
+-        if (!caps.empty() || capFailed.empty()) semCaps = 0;
+-        else if (!semCaps) semCaps = GetTickCount();
+-        else if (GetTickCount() - semCaps > 3000 && !capJaFuncionou) semCaptura = true;
+-    }
+     std::vector<std::pair<HWND, std::shared_ptr<WinCap>>> got;
+     { std::lock_guard<std::mutex> lk(readyMx); got.swap(ready); }
+     for (auto& [h, c] : got) {
+         pending.erase(std::remove(pending.begin(), pending.end(), h), pending.end());
+         if (!c) {
+             if (!capFailed.count(h)) { wchar_t cl[64] = {}; GetClassNameW(h, cl, 64); Log(L"vidro real: captura recusada para %ls", cl); }
+-            {   // a mesa (o papel de parede) é o fundo de quase tudo: sem ela o vidro fica preto onde não há janela atrás
+-                wchar_t cl[64] = {}; GetClassNameW(h, cl, 64);
+-                if (!capJaFuncionou && !g_papel && (!wcscmp(cl, L"SequoiaMesa") || !wcscmp(cl, L"Progman") || !wcscmp(cl, L"WorkerW"))) semCaptura = true;
+-            }
+             capFailed[h] = GetTickCount();
+         }
+     }
+@@ -862,11 +878,21 @@ void RefreshWindows() {
+     if (changed) { capDirty = true; allDirty = true; }
+     if (capFailed.size() > 256) capFailed.clear();
+     if (!toStart.empty()) {
+-        std::thread([toStart] {
++        std::thread([toStart, generation = captureGeneration.load()] {
+             winrt::init_apartment(winrt::apartment_type::multi_threaded);
+             for (HWND h : toStart) {
++                if (generation != captureGeneration) break;
+                 auto c = StartCap(h);
+-                { std::lock_guard<std::mutex> lk(readyMx); ready.emplace_back(h, c); }
++                {
++                    std::lock_guard<std::mutex> lk(readyMx);
++                    if (generation == captureGeneration) {
++                        ready.emplace_back(h, std::move(c));
++                    }
++                }
++                if (generation != captureGeneration) {
++                    if (c) c->Close();
++                    break;
++                }
+                 if (!posted.exchange(true)) PostMessageW(msgWnd, WM_RG_FRAME, 0, 0);
+             }
+             winrt::uninit_apartment();
+@@ -1005,7 +1031,11 @@ void Compose() {
+         for (auto& a : areas) if (IntersectRect(&x, &b, &a)) { rel = true; break; }
+         c->relevant = rel;
+     }
+-    if (areas.empty()) return;
++    if (areas.empty()) {
++        emptySince = 0;
++        lastDirty.clear();
++        return;
++    }
+     if (!allDirty) {  // só quadros novos de janelas longe das peças: nada a montar (nem abrir o desenho)
+         bool any = false;
+         for (auto& c : caps) {
+@@ -1039,7 +1069,7 @@ void Compose() {
+     }
+     lastDirty.push_back(area);
+     util->PushAxisAlignedClip(D2D1::RectF((float)area.left, (float)area.top, (float)area.right, (float)area.bottom), D2D1_ANTIALIAS_MODE_ALIASED);
+-    util->Clear(D2D1::ColorF(0, 0, 0, 1));
++    util->Clear(D2D1::ColorF(ui::Dark() ? 0x262629 : 0xE4E4E7));
+     if (g_papel) {
+         auto sz = g_papel->GetPixelSize();
+         float x = (float)(g_papelTela.left - mon.left), y = (float)(g_papelTela.top - mon.top);
+@@ -1057,13 +1087,13 @@ void Compose() {
+             winrt::com_ptr<IDXGISurface> sf;
+             winrt::check_hresult(access->GetInterface(IID_PPV_ARGS(sf.put())));
+             auto cs = c->frame.ContentSize();
+-            if (c->mesa && g_papel) {  // a mesa: confere o quadro novo uma vez; todo preto, fica o papel de parede
++            if (c->mesa) {  // a mesa: confere o quadro novo uma vez; todo preto, fica o papel de parede
+                 if (c->fresh || c->preto < 0) {
+                     int antes = c->preto;
+                     c->preto = sf.try_as<ID3D11Texture2D>() ? (QuadroPreto(sf.as<ID3D11Texture2D>().get(), cs.Width, cs.Height) ? 1 : 0) : 0;
+                     if (c->preto != antes && c->preto == 1) {
+                         wchar_t cl[48] = {}; GetClassNameW(c->h, cl, 48);
+-                        Log(L"vidro real: a captura de %ls veio preta; vale o papel de parede", cl);
++                        Log(L"vidro real: a captura de %ls veio preta; usando o fundo de reserva", cl);
+                     }
+                 }
+                 if (c->preto == 1 || g_fingeMesaPreta) { c->rect = Bounds(c->h); continue; }
+@@ -1086,14 +1116,15 @@ void Compose() {
+     for (auto& c : caps) c->fresh = false;
+     HRESULT hr = util->EndDraw();
+     util->SetTarget(nullptr);
+-    {   // nenhuma janela entregou quadro (captura de janelas recusada: VM, área remota, política): o fundo do vidro
+-        // ficaria PRETO (Dock, barra de menus e painéis pretos). Depois de 3 s assim, o vidro real desiste e volta o fosco.
+-        static DWORD vazio = 0;
+-        // Só desiste se a captura NUNCA funcionou: com ela já funcionando, um fundo vazio é passageiro (a Captura
+-        // de Tela, um jogo em tela cheia ou o bloqueio cobrindo tudo) e antes desligava o vidro até reiniciar.
+-        if (!keep.empty()) { vazio = 0; capJaFuncionou = true; }
+-        else if (!vazio) vazio = GetTickCount();
+-        else if (GetTickCount() - vazio > 3000 && !capJaFuncionou) semCaptura = true;
++    if (FAILED(hr)) {
++        lastDirty.clear();
++        semCaptura = true;
++    } else if (g_papel || !keep.empty()) {
++        emptySince = 0;
++    } else if (!emptySince) {
++        emptySince = GetTickCount64();
++    } else if (GetTickCount64() - emptySince >= 3000) {
++        semCaptura = true;
+     }
+     static size_t lastN = (size_t)-1;
+     if (caps.size() != lastN || FAILED(hr)) {  // só quando muda o número de janelas (antes logava ~1,5 vez por segundo)
+@@ -1243,12 +1274,17 @@ bool Init() {
+     return ok;
+ }
+ 
+-bool semCaptura = false;  // a captura de janelas não funciona aqui: o vidro real fica desligado (senão tudo fica preto)
++bool semCaptura = false;  // use frosted glass while waiting for the capture retry
+ void SetActive(bool on) {
+     if (on && semCaptura) return;
+     if (on && !Init()) return;
+     if (!ok || on == active) return;
+     active = on;
++    emptySince = 0;
++    lastDirty.clear();
++    composed.clear();
++    capDirty = allDirty = true;
++    frameDirty = false;
+     try {
+         if (on) { SetTimer(msgWnd, T_RG, 250, nullptr); SetTimer(msgWnd, T_RG + 1, 16, nullptr); }
+         else { KillTimer(msgWnd, T_RG); KillTimer(msgWnd, T_RG + 1); StopCaps(); }
+@@ -1579,7 +1615,7 @@ bool backdrop::Liquid() { return g_style.liquid && !g_style.reduce; }
+ void backdrop::Restart() {
+     Log(L"vidro real: reiniciado pelo usuário (estava %ls%ls)", rg::active ? L"ligado" : L"desligado", rg::semCaptura ? L", desistido" : L"");
+     rg::semCaptura = false;
+-    rg::capJaFuncionou = false;
++    if (rg::msgWnd) KillTimer(rg::msgWnd, rg::T_RG_RETRY);
+     if (rg::active) rg::SetActive(false);  // fecha todas as capturas; o Reload abre de novo
+     Reload();
+ }
+@@ -1611,11 +1647,11 @@ void backdrop::Reload() {
+         int motivo = !pedido || s.real ? 0 : rg::semCaptura ? 1 : jogo::Ativo() ? 2 : 3;
+         if (motivo != ultimo && motivo)
+             Log(L"vidro real: ligado nos ajustes, mas fica fosco (%ls)",
+-                motivo == 1 ? L"a captura de janelas falhou nesta sessão" : motivo == 2 ? L"modo jogo" : L"modo leve ligado");
++                motivo == 1 ? L"a captura de janelas está aguardando nova tentativa" : motivo == 2 ? L"modo jogo" : L"modo leve ligado");
+         ultimo = motivo;
+     }
+     if (leveMudou && g_comp)  // o fosco é refeito com a receita nova (Apply põe na peça)
+-        for (auto& [h, e] : g_entries) if (e.liquidBuilt) { try { e.baseBrush = MakeFrost(); } catch (...) {} }
++        for (auto& [h, e] : g_entries) if (e.liquidBuilt && e.hasHostBackdrop) { try { e.baseBrush = MakeFrost(); } catch (...) {} }
+     g_style = s;
+     if (g_comp) rg::SetActive(s.real);
+     // menus (barra de menus, Dock, Central): mais opacos que os painéis, para ler bem
+@@ -1673,8 +1709,10 @@ bool backdrop::Attach(HWND h) {
+             g_comp = wuc::Compositor();
+         }
+         BOOL on = TRUE;
+-        DwmSetWindowAttribute(h, 17 /*DWMWA_USE_HOSTBACKDROPBRUSH*/, &on, sizeof(on));
++        HRESULT host = DwmSetWindowAttribute(h, 17 /*DWMWA_USE_HOSTBACKDROPBRUSH*/, &on, sizeof(on));
++        // The capture surface used for refraction works independently of the host brush.
+         Entry e;
++        e.hasHostBackdrop = SUCCEEDED(host);
+         e.hwnd = h;
+         auto interop = g_comp.as<abi::ICompositorDesktopInterop>();
+         winrt::check_hresult(interop->CreateDesktopWindowTarget(h, FALSE,
+@@ -1683,7 +1721,8 @@ bool backdrop::Attach(HWND h) {
+         e.root.RelativeSizeAdjustment({ 1, 1 });
+         e.blur = g_comp.CreateSpriteVisual();
+         e.blur.RelativeSizeAdjustment({ 1, 1 });
+-        e.hostBrush = g_comp.CreateHostBackdropBrush();
++        if (e.hasHostBackdrop) e.hostBrush = g_comp.CreateHostBackdropBrush();
++        else e.hostBrush = g_comp.CreateColorBrush(Col(0, 0, 0, 0));
+         e.blur.Brush(e.hostBrush);
+ 
+         e.tint = g_comp.CreateSpriteVisual();
+diff --git a/src/shell/widgets.cpp b/src/shell/widgets.cpp
+index 2ce5663..2a89420 100644
+--- a/src/shell/widgets.cpp
++++ b/src/shell/widgets.cpp
+@@ -3,11 +3,12 @@
+ // Medidas da referência (Sequoia, 0,72 px por pt): pequeno 170 × 170 pt, médio 364 × 170 pt, 16 pt entre
+ // eles, canto de 21 pt. Claro: as cores de cada widget (Tempo em degradê do céu, Calendário branco, Relógio
+ // Mundial preto, Relógio em vidro). Escuro: todos em vidro desfocado da mesa, com texto e símbolos brancos.
+-// O tempo vem do Open-Meteo (sem chave), a cada 15 min, para a cidade em ajustes.txt (padrão: a do fuso do Windows, comum/cidade_padrao.h);
++// O tempo vem do ECMWF IFS pelo Open-Meteo, a cada 15 min, para a cidade em ajustes.txt (padrão: a do fuso do Windows, comum/cidade_padrao.h);
+ // a última resposta fica em %APPDATA%\Shell\tempo.json para aparecer já ao ligar.
+ #include "shell.h"
+ #include "../comum/fonte_cjk.h" // a reserva para coreano, japonês e chinês
+ #include "../comum/cidade_padrao.h"
++#include "../comum/previsao.h"
+ #include "../menu/context_menu.h"
+ #include <dwmapi.h>
+ #include <shellapi.h>
+@@ -106,14 +107,18 @@ bool Parse(const std::string& j, Weather& w) {
+     double off = Number(j, "utc_offset_seconds");
+     if (!std::isnan(off)) w.utcOffset = (int)off;
+     w.temp = (float)Number(cur, "temperature_2m");
+-    w.code = (int)Number(cur, "weather_code");
+-    w.day = Number(cur, "is_day") > 0.5;
++    double code = Number(cur, "weather_code"), day = Number(cur, "is_day");
++    if (!std::isfinite(w.temp) || !std::isfinite(code) || !std::isfinite(day)) return false;
++    w.code = (int)code;
++    w.day = day > 0.5;
+     auto t = Array(hr, "time"), tp = Array(hr, "temperature_2m"), c = Array(hr, "weather_code"), d = Array(hr, "is_day");
+     w.hours.clear();
+     for (size_t i = 0; i < t.size() && i < tp.size() && i < c.size() && i < d.size(); i++)
+-        w.hours.push_back({ t[i], (float)tp[i], (int)c[i], d[i] > 0.5 });
++        if (std::isfinite(t[i]) && std::isfinite(tp[i]) && std::isfinite(c[i]) && std::isfinite(d[i]))
++            w.hours.push_back({ t[i], (float)tp[i], (int)c[i], d[i] > 0.5 });
+     auto mx = Array(dl, "temperature_2m_max"), mn = Array(dl, "temperature_2m_min"), sr = Array(dl, "sunrise"), ss = Array(dl, "sunset");
+-    if (mx.empty() || mn.empty() || sr.size() < 2 || ss.size() < 2 || std::isnan(w.temp)) return false;
++    if (mx.empty() || mn.empty() || sr.size() < 2 || ss.size() < 2 || w.hours.empty() ||
++        !std::isfinite(mx[0]) || !std::isfinite(mn[0])) return false;
+     w.hi = (float)mx[0]; w.lo = (float)mn[0];
+     for (int i = 0; i < 2; i++) { w.sunrise[i] = sr[i]; w.sunset[i] = ss[i]; }
+     w.ok = true;
+@@ -158,9 +163,14 @@ void Fetch() {
+         std::wstring path = L"/v1/forecast?latitude=" + lat + L"&longitude=" + lon +
+             L"&current=temperature_2m,weather_code,is_day&hourly=temperature_2m,weather_code,is_day"
+             L"&daily=temperature_2m_max,temperature_2m_min,sunrise,sunset&timezone=auto&forecast_days=3&timeformat=unixtime";
+-        std::string body = HttpGet(L"api.open-meteo.com", path);
+         Weather w;
+-        if (!body.empty() && Parse(body, w)) {
++        std::string body = previsao::Fetch(path, HttpGet, [&w](const std::string& response) {
++            Weather candidate;
++            if (!Parse(response, candidate)) return false;
++            w = std::move(candidate);
++            return true;
++        });
++        if (!body.empty()) {
+             { std::lock_guard<std::mutex> lk(g_mx); g_wx = w; }
+             FILE* fp = nullptr;
+             if (!_wfopen_s(&fp, CachePath().c_str(), L"wb") && fp) { fwrite(body.data(), 1, body.size(), fp); fclose(fp); }
+@@ -597,7 +607,8 @@ void PaintSun(ID2D1DeviceContext* dc, ID2D1SolidColorBrush* br, ID2D1StrokeStyle
+     if (!dark) Sky(dc, w, h, 0, wx.ok ? wx.day : true);
+     double now = (double)time(nullptr);
+     bool toSunset = false; double ev = 0, other = 0;
+-    if (wx.ok) {
++    if (wx.ok && std::isfinite(wx.sunrise[0]) && std::isfinite(wx.sunset[0]) &&
++        std::isfinite(wx.sunrise[1]) && std::isfinite(wx.sunset[1])) {
+         if (now < wx.sunrise[0]) { ev = wx.sunrise[0]; other = wx.sunset[0]; }
+         else if (now < wx.sunset[0]) { toSunset = true; ev = wx.sunset[0]; other = wx.sunrise[1]; }
+         else { ev = wx.sunrise[1]; other = wx.sunset[1]; }
+@@ -607,12 +618,12 @@ void PaintSun(ID2D1DeviceContext* dc, ID2D1SolidColorBrush* br, ID2D1StrokeStyle
+     Sun(dc, br, st, hx + 6, 22, 13, WHITE);
+     Txt(dc, br, toSunset ? Tr(L"PÔR DO SOL") : Tr(L"NASCER DO SOL"), 11, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING,
+         D2D1::RectF(hx + 16, 14, w, 30), C(1, 1, 1, 0.92f));
+-    Txt(dc, br, wx.ok ? HourMin(ev, wx.utcOffset) : L"--:--", 30, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING,
++    Txt(dc, br, ev > 0 ? HourMin(ev, wx.utcOffset) : L"--:--", 30, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING,
+         D2D1::RectF(hx - 1, 32, w, 68), WHITE, true);
+     // curva do dia: meia-noite embaixo, meio-dia em cima; a linha do horizonte passa no nascer do sol
+     float cy = 104, A = 18;
+     auto yOf = [&](float u) { return cy + A * std::cos(2 * PI * u); };
+-    float horizon = wx.ok ? yOf(LocalMinuteOfDay(wx.sunrise[0], wx.utcOffset) / 1440.f) : cy;
++    float horizon = wx.ok && std::isfinite(wx.sunrise[0]) ? yOf(LocalMinuteOfDay(wx.sunrise[0], wx.utcOffset) / 1440.f) : cy;
+     br->SetColor(C(1, 1, 1, 0.35f));
+     dc->DrawLine({ 0, horizon }, { w, horizon }, br, 1);
+     ID2D1Factory* f = nullptr; dc->GetFactory(&f);
+@@ -635,7 +646,7 @@ void PaintSun(ID2D1DeviceContext* dc, ID2D1SolidColorBrush* br, ID2D1StrokeStyle
+         float u = LocalMinuteOfDay(now, wx.utcOffset) / 1440.f, x = w * u, y = yOf(u);
+         br->SetColor(C(1, 1, 1, 0.25f)); dc->FillEllipse(D2D1::Ellipse({ x, y }, 8, 8), br);
+         br->SetColor(WHITE); dc->FillEllipse(D2D1::Ellipse({ x, y }, 5, 5), br);
+-        std::wstring bottom = std::wstring(toSunset ? Tr(L"Nascer do sol: ") : Tr(L"Pôr do sol: ")) + HourMin(other, wx.utcOffset);
++        std::wstring bottom = std::wstring(toSunset ? Tr(L"Nascer do sol: ") : Tr(L"Pôr do sol: ")) + (other > 0 ? HourMin(other, wx.utcOffset) : L"--:--");
+         Txt(dc, br, bottom, 11, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_LEADING, D2D1::RectF(hx, 138, w, 156), C(1, 1, 1, 0.85f));
+     }
+ }
