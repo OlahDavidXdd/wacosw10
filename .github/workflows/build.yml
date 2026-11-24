@@ -21,7 +21,7 @@ jobs:
           call build.cmd || exit /b 1
           call build.cmd janelas || exit /b 1
           >bin\versao.txt echo w10-liquid-glass-1
-          powershell -NoProfile -ExecutionPolicy Bypass -File tools\empacotar.ps1 -Atualizacao || exit /b 1
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\empacotar.ps1 -Atualizacao -SemSistema || exit /b 1
       - uses: actions/upload-artifact@v4
         with:
           name: WacOS-Windows-10
